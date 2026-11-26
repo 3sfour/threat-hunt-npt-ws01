@@ -1,0 +1,121 @@
+// Threat Hunt: NPT-WS01 (Help Desk Ticket #4451)
+// Microsoft Defender XDR, Advanced Hunting
+// These are the queries I used to answer each flag in the hunt.
+
+let start_time = datetime(2026-04-21T00:00:00.00Z);
+let end_time = datetime(2026-04-23T00:00:00.00Z);
+let HostInQuestion = "npt-ws01";
+let NoiseSuffixes = dynamic([".microsoft.com", ".windows.com", ".azure.com"]);
+
+// ---------------------------------------------------------------
+// Flags 1 & 2: who logged on, and from where
+// Answer: helpdesk from 20.110.92.50
+// ---------------------------------------------------------------
+DeviceLogonEvents
+| where Timestamp between (start_time .. end_time)
+| where DeviceName =~ HostInQuestion
+| where ActionType == "LogonSuccess" and LogonType in ("Network","RemoteInteractive")
+| project Timestamp, AccountName, LogonType, RemoteIP;
+
+// ---------------------------------------------------------------
+// Flags 3 & 4: what ran under helpdesk, and what spawned it
+// Answer: cmd.exe /Q /c start "" "C:\Windows\Temp\WindowsUpdate.exe"
+//         parent: wmiprvse.exe (Impacket wmiexec)
+// ---------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp between (start_time .. end_time)
+| where DeviceName =~ HostInQuestion
+| where AccountName =~ "helpdesk"
+| project Timestamp, AccountName, FileName, ProcessCommandLine, InitiatingProcessFileName
+| order by Timestamp asc;
+
+// ---------------------------------------------------------------
+// Flag 5: C2 domain (outbound 443 with Microsoft noise filtered out)
+// Answer: updates.abordasync.website
+// ---------------------------------------------------------------
+DeviceNetworkEvents
+| where Timestamp between (start_time .. end_time)
+| where DeviceName =~ HostInQuestion
+| where RemotePort == 443
+| where not(RemoteUrl has_any (NoiseSuffixes))
+| project Timestamp, InitiatingProcessFileName, RemoteIP, RemoteUrl;
+
+// ---------------------------------------------------------------
+// Flag 6: the dropped implant's hash
+// Answer: 20cef6a013953890f9d38605d25d60dd63b42b09946bbb18ddb4a456da306e77
+// ---------------------------------------------------------------
+DeviceFileEvents
+| where Timestamp between (start_time .. end_time)
+| where DeviceName contains HostInQuestion
+| where isnotempty(SHA256)
+| where FileName endswith ".exe"
+| where FolderPath contains "\\Temp\\"
+| project Timestamp, DeviceName, ActionType, FileName, FolderPath, SHA256
+| order by Timestamp desc;
+
+// ---------------------------------------------------------------
+// Flag 7: Run key persistence
+// Answer: WindowsHealthCheck
+// ---------------------------------------------------------------
+DeviceRegistryEvents
+| where Timestamp between (start_time .. end_time)
+| where DeviceName contains HostInQuestion
+| where RegistryKey contains @"\CurrentVersion\Run"
+| where ActionType == "RegistryValueSet"
+| project Timestamp, RegistryKey, RegistryValueName, RegistryValueData, InitiatingProcessCommandLine
+| order by Timestamp desc;
+
+// ---------------------------------------------------------------
+// Flag 8: scheduled task persistence
+// Answer: GoogleUpdaterTask
+// ---------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp between (start_time .. end_time)
+| where DeviceName contains HostInQuestion
+| where FileName =~ "schtasks.exe"
+| where ProcessCommandLine contains "/create"
+| project Timestamp, FileName, ProcessCommandLine, InitiatingProcessFileName;
+
+// ---------------------------------------------------------------
+// Flag 9: service persistence
+// Answer: WindowsHealthSvc
+// ---------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp between (start_time .. end_time)
+| where DeviceName contains HostInQuestion
+| where FileName =~ "sc.exe"
+| where ProcessCommandLine contains "create"
+| project Timestamp, FileName, ProcessCommandLine, InitiatingProcessFileName;
+
+// ---------------------------------------------------------------
+// Flag 10: backdoor local admin
+// Answer: nexus_admin
+// ---------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp between (start_time .. end_time)
+| where DeviceName contains HostInQuestion
+| where FileName in~ ("net.exe", "net1.exe")
+| where ProcessCommandLine contains "/add"
+| project Timestamp, FileName, ProcessCommandLine, InitiatingProcessFileName
+| order by Timestamp asc;
+
+// ---------------------------------------------------------------
+// Flag 11: the second host
+// Answer: npt-srv01
+// ---------------------------------------------------------------
+DeviceLogonEvents
+| where DeviceName =~ "npt-srv01"
+| where LogonType in ("RemoteInteractive", "Network")
+| where RemoteDeviceName =~ "npt-ws01" or RemoteIP != ""
+| project Timestamp, AccountName, LogonType, RemoteDeviceName, RemoteIP
+| order by Timestamp asc;
+
+// ---------------------------------------------------------------
+// Extra: the password spray behind the overnight login prompts
+// ---------------------------------------------------------------
+DeviceLogonEvents
+| where Timestamp between (start_time .. end_time)
+| where DeviceName startswith HostInQuestion
+| where ActionType == "LogonFailed"
+| summarize Attempts = count(), First = min(Timestamp), Last = max(Timestamp) by AccountName, RemoteIP
+| order by Attempts desc;

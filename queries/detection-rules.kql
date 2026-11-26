@@ -1,0 +1,19 @@
+// Detection rules I'd add after this incident.
+// Each one would have caught a different stage of the attack.
+
+// 1. Successful network logon from a public IP.
+//    Would have fired at 03:42 UTC, before anything else happened.
+DeviceLogonEvents
+| where ActionType == "LogonSuccess"
+| where LogonType in ("Network", "RemoteInteractive")
+| where isnotempty(RemoteIP) and not(ipv4_is_private(RemoteIP));
+
+// 2. Impacket wmiexec pattern: WMI provider host spawning a quiet cmd.exe.
+DeviceProcessEvents
+| where InitiatingProcessFileName =~ "wmiprvse.exe"
+| where FileName =~ "cmd.exe" and ProcessCommandLine has "/Q /c";
+
+// 3. Persistence built from a Temp folder (Run key, task or service).
+DeviceProcessEvents
+| where FileName in~ ("schtasks.exe", "sc.exe", "reg.exe")
+| where ProcessCommandLine has @"\Temp\";
